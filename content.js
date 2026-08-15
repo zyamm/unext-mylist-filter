@@ -1,40 +1,48 @@
 // content.js
 
-// セキュリティ対策: HTML文字列のエスケープ処理
-function escapeHTML(str) {
-  return str.replace(/[&<>'"]/g, function(match) {
-    const escape = {
-      '&': '&amp;',
-      '<': '&lt;',
-      '>': '&gt;',
-      "'": '&#39;',
-      '"': '&quot;'
-    };
-    return escape[match];
+// 待機用のスリープ関数（ミリ秒指定）
+const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
+
+// ストレージからキャッシュを取得
+async function getCachedInfo(pid) {
+  return new Promise(resolve => {
+    chrome.storage.local.get([pid], (result) => {
+      resolve(result[pid] || null);
+    });
   });
 }
 
-// 動画ごとの女優・監督情報をキャッシュするオブジェクト
-const packageCache = {};
+// ストレージに情報をキャッシュ
+async function setCachedInfo(pid, actresses) {
+  return new Promise(resolve => {
+    const data = {};
+    data[pid] = actresses;
+    chrome.storage.local.set(data, resolve);
+  });
+}
 
-// 詳細ページから女優・監督情報を取得する非同期関数
+// 詳細ページから女優情報を取得する非同期関数
 async function fetchActressInfo(pid) {
-  if (packageCache[pid]) return packageCache[pid];
+  // 1. まずローカルのキャッシュを確認
+  const cachedData = await getCachedInfo(pid);
+  if (cachedData) return cachedData;
 
+  // 2. キャッシュがなければサーバーへ通信して取得
   try {
-    // 実際のURL構造に合わせてフェッチ（URLは推測です）
     const response = await fetch(`/library/mylist/package?pid=${pid}`);
     const text = await response.text();
     
-    // DOMParserでHTMLを解析し、情報を抽出
     const parser = new DOMParser();
     const doc = parser.parseFromString(text, 'text/html');
     
-    // Elements_content.txt の構造に基づく抽出
+    // "-ALIAS" のリンクを持つ女優名を抽出
     const actressNodes = doc.querySelectorAll('a[href*="-ALIAS"] span.truncate');
     const actresses = Array.from(actressNodes).map(node => node.textContent.trim());
     
-    packageCache[pid] = actresses;
+    // 取得した情報を保存し、サーバーへの負荷を下げるために1秒（1000ms）待機
+    await setCachedInfo(pid, actresses);
+    await sleep(1000); 
+    
     return actresses;
   } catch (error) {
     console.error(`Failed to fetch info for ${pid}:`, error);
@@ -44,21 +52,20 @@ async function fetchActressInfo(pid) {
 
 // UIの追加（絞り込み用セレクトボックス）
 function injectCustomUI() {
-  // 既存の「追加順」ボタン群の親要素を取得
   const sortContainer = document.querySelector('select').parentElement.parentElement;
   if (!sortContainer || document.getElementById('custom-filter-ui')) return;
 
-  // コンテナを作成
   const customContainer = document.createElement('div');
   customContainer.id = 'custom-filter-ui';
   customContainer.className = 'flex items-center relative h-8 pl-3 pr-2.5 gap-x-px md:gap-x-0.5 font-semibold transition-colors border text-3xs md:text-sm rounded-2xl border-purple/10 hover:bg-purple/10 text-purple ml-2';
   
   const customLabel = document.createElement('span');
-  customLabel.textContent = '女優絞り込み';
+  customLabel.textContent = '読込中...'; // 初期状態は読込中とする
+  customLabel.id = 'custom-filter-label';
   
   const customSelect = document.createElement('select');
   customSelect.className = 'absolute top-0 left-0 w-full h-full opacity-0 cursor-pointer';
-  customSelect.innerHTML = `<option value="">すべて</option>`; // 初期オプション
+  customSelect.innerHTML = `<option value="">すべて</option>`;
   
   customSelect.addEventListener('change', (e) => {
     filterByActress(e.target.value);
@@ -70,39 +77,39 @@ function injectCustomUI() {
 }
 
 // リストの絞り込み処理
-function filterByActress(actressName) {
+async function filterByActress(actressName) {
   const articles = document.querySelectorAll('article');
   
-  articles.forEach(article => {
-    // aタグのhrefからpidを抽出
+  for (const article of articles) {
     const link = article.querySelector('a[data-testid="PackageCard"]');
-    if (!link) return;
+    if (!link) continue;
     
     const pidMatch = link.getAttribute('href').match(/pid=([^&]+)/);
-    if (!pidMatch) return;
-    const pid = pidMatch[1];
-
-    const actresses = packageCache[pid] || [];
+    if (!pidMatch) continue;
     
-    // 選択された女優が含まれているか、空（すべて）なら表示
+    const pid = pidMatch[1];
+    const actresses = await getCachedInfo(pid) || [];
+    
     if (actressName === "" || actresses.includes(actressName)) {
       article.style.display = '';
     } else {
       article.style.display = 'none';
     }
-  });
+  }
 }
 
-// メイン処理の初期化
+// メイン処理
 async function init() {
   injectCustomUI();
 
-  // マイリスト上の全動画を取得
   const articles = document.querySelectorAll('article');
   const uniqueActresses = new Set();
   const selectElement = document.querySelector('#custom-filter-ui select');
+  const labelElement = document.getElementById('custom-filter-label');
 
-  // 注意: 全件並列fetchはサーバーに負荷をかけるため、本来は直列やバッチ処理推奨
+  let count = 0;
+
+  // 1件ずつ順番に取得（キャッシュがあれば通信は発生しない）
   for (const article of articles) {
     const link = article.querySelector('a[data-testid="PackageCard"]');
     if (!link) continue;
@@ -115,7 +122,6 @@ async function init() {
       actresses.forEach(actress => {
         if (!uniqueActresses.has(actress)) {
           uniqueActresses.add(actress);
-          // セキュリティ: textContentを使用してXSSを防ぐ
           const option = document.createElement('option');
           option.value = actress;
           option.textContent = actress;
@@ -123,8 +129,16 @@ async function init() {
         }
       });
     }
+    
+    count++;
+    if (labelElement) {
+      labelElement.textContent = `女優絞り込み (${count}/${articles.length})`;
+    }
+  }
+
+  if (labelElement) {
+    labelElement.textContent = '女優絞り込み';
   }
 }
 
-// SPA（Single Page Application）対策として、少し遅延させて実行
 setTimeout(init, 2000);
