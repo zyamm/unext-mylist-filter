@@ -48,7 +48,20 @@ function filterByActress(aliasId) {
   if (!localData) return;
 
   const articles = document.querySelectorAll('article');
+  if (articles.length === 0) return;
+
+  // 全てのグリッド要素と、その親の行ラッパー要素を取得
+  const allGrids = Array.from(document.querySelectorAll('.grid'));
+  const rowWrappers = allGrids.map(grid => grid.parentElement);
+
+  // 1. 各articleの元の親コンテナを記憶し、絞り込み条件に合うか判定
+  const matchedArticles = [];
   articles.forEach(article => {
+    // 初回参照時に元の親グリッドを記憶
+    if (!article._originalParent) {
+      article._originalParent = article.parentElement;
+    }
+
     const link = article.querySelector('a[data-testid="PackageCard"]');
     if (!link) return;
 
@@ -59,28 +72,82 @@ function filterByActress(aliasId) {
     const packageInfo = localData.packages[pid];
     const aliases = packageInfo ? packageInfo.aliases : [];
 
-    // 選択された女優が含まれていれば表示、それ以外は非表示
+    // 選択された条件に合致するか判定
     if (currentSelectedAliasId === "" || aliases.includes(currentSelectedAliasId)) {
-      article.style.display = '';
-    } else {
-      article.style.display = 'none';
+      matchedArticles.push(article);
     }
   });
+
+  if (currentSelectedAliasId === "") {
+    // 【指定なしの場合】すべてのカードを元の親グリッドに戻し、表示状態をリセット
+    articles.forEach(article => {
+      if (article._originalParent) {
+        article._originalParent.appendChild(article);
+      }
+      article.style.display = '';
+    });
+    // 全ての行ラッパーを表示
+    rowWrappers.forEach(wrapper => {
+      if (wrapper) wrapper.style.display = '';
+    });
+    // メイングリッドの行間スタイルをリセット
+    if (allGrids[0]) allGrids[0].style.rowGap = '';
+  } else {
+    // 【絞り込みありの場合】カードを左上から順に詰めて並べる
+    if (allGrids.length === 0) return;
+    const mainGrid = allGrids[0];
+
+    // 1つのグリッド内で複数行並ぶため行間（row-gap）を設定
+    mainGrid.style.rowGap = '28px';
+
+    // 該当するカードを表示し、先頭のグリッドに順番に追加（自動で左上から詰まる）
+    matchedArticles.forEach(article => {
+      article.style.display = '';
+      mainGrid.appendChild(article);
+    });
+
+    // 該当しないカードは非表示
+    articles.forEach(article => {
+      if (!matchedArticles.includes(article)) {
+        article.style.display = 'none';
+      }
+    });
+
+    // 2行目以降の空になった行ラッパーを非表示にし、先頭行ラッパーのみ表示
+    rowWrappers.forEach((wrapper, index) => {
+      if (wrapper) {
+        wrapper.style.display = (index === 0) ? '' : 'none';
+      }
+    });
+  }
 }
 
 // スクロール等による動的DOM追加を監視し、選択中の条件で再絞り込みを行う関数
 function observeDOMChanges() {
   const targetNode = document.querySelector('section') || document.body;
   const observer = new MutationObserver((mutations) => {
-    let hasNewNodes = false;
+    let hasUnprocessedArticles = false;
+
     for (const mutation of mutations) {
-      if (mutation.addedNodes.length > 0) {
-        hasNewNodes = true;
-        break;
+      for (const node of mutation.addedNodes) {
+        if (node.nodeType === 1) {
+          // 新しく追加されたノードからarticle要素を検出
+          const articles = node.tagName === 'ARTICLE' ? [node] : Array.from(node.querySelectorAll?.('article') || []);
+          for (const article of articles) {
+            // 元の親が未記録の（新しく動的読み込みされた）カードがあるか判定
+            if (!article._originalParent) {
+              hasUnprocessedArticles = true;
+              break;
+            }
+          }
+        }
+        if (hasUnprocessedArticles) break;
       }
+      if (hasUnprocessedArticles) break;
     }
-    // 新しい要素が追加された場合のみ絞り込みを再適用
-    if (hasNewNodes && currentSelectedAliasId !== "") {
+
+    // 未処理の新しいカードが追加された場合のみ絞り込みを再適用
+    if (hasUnprocessedArticles && currentSelectedAliasId !== "") {
       filterByActress(currentSelectedAliasId);
     }
   });
