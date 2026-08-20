@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "MyList Filter & Sorter",
-  "version": "1.2",
+  "version": "1.0",
   "description": "マイリストで女優・監督による絞り込みとソートを追加します。",
   "content_scripts": [
     {
