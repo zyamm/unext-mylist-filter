@@ -1,6 +1,7 @@
 // content.js
 let localData = null; // local_data.jsonのデータを保持
 let currentSelectedAliasId = ""; // 現在選択されている絞り込みIDを保持
+const cardCache = new Map(); // pid -> article要素のクローンを保持するキャッシュ
 
 async function loadLocalData() {
   try {
@@ -11,6 +12,72 @@ async function loadLocalData() {
   } catch (error) {
     console.error('local_data.jsonの読み込みエラー:', error);
     return null;
+  }
+}
+
+// 現在DOM上にレンダリングされているカードをキャッシュに保存する関数
+function cacheArticlesFromDOM() {
+  const articles = document.querySelectorAll('article');
+  articles.forEach(article => {
+    const link = article.querySelector('a[data-testid="PackageCard"]');
+    if (!link) return;
+
+    const pidMatch = link.getAttribute('href')?.match(/pid=([^&]+)/);
+    if (!pidMatch) return;
+
+    const pid = pidMatch[1];
+    if (!cardCache.has(pid)) {
+      // 仮想スクロールによる削除に備え、要素を複製してキャッシュに保存
+      const clone = article.cloneNode(true);
+      clone.style.cssText = ''; // スタイルをクリア
+      cardCache.set(pid, clone);
+    }
+  });
+}
+
+// まだ画面に描画されたことがないカードを全件自動収集するスキャン関数
+async function scanAndCacheAllCards() {
+  const totalPackages = Object.keys(localData?.packages || {}).length;
+  if (totalPackages > 0 && cardCache.size >= totalPackages) {
+    return;
+  }
+
+  showLoadingIndicator(true);
+
+  const originalScrollY = window.scrollY;
+  // 仮想スクロールの親コンテナから全高を取得
+  const virtualContainer = document.querySelector('section > div > div');
+  const totalHeight = virtualContainer ? parseFloat(virtualContainer.style.height) || document.body.scrollHeight : document.body.scrollHeight;
+  const step = Math.floor(window.innerHeight * 0.8) || 600;
+
+  // Reactの描画更新（150ms）を待ちながら順番にスクロールして全カードを読み込む
+  for (let top = 0; top <= totalHeight; top += step) {
+    window.scrollTo(0, top);
+    await new Promise(resolve => setTimeout(resolve, 150));
+    cacheArticlesFromDOM();
+  }
+
+  // スキャン完了後、元のスクロール位置に戻す
+  window.scrollTo(0, originalScrollY);
+  cacheArticlesFromDOM();
+
+  showLoadingIndicator(false);
+}
+
+// 読み込み中インジケータの表示制御
+function showLoadingIndicator(show) {
+  let indicator = document.getElementById('filter-loading-indicator');
+  if (show) {
+    if (!indicator) {
+      indicator = document.createElement('div');
+      indicator.id = 'filter-loading-indicator';
+      indicator.className = 'fixed bottom-4 right-4 bg-purple text-white text-xs px-4 py-2 rounded-full shadow-lg z-[9999] flex items-center gap-2';
+      indicator.innerHTML = '<span>カード情報を全件読み込み中...</span>';
+      document.body.appendChild(indicator);
+    }
+    indicator.style.display = 'flex';
+  } else if (indicator) {
+    indicator.style.display = 'none';
   }
 }
 
@@ -39,116 +106,89 @@ function injectCustomUI() {
   sortContainer.appendChild(customContainer);
 }
 
-function filterByActress(aliasId) {
-  // 引数が指定された場合は現在選択されているIDを更新
+async function filterByActress(aliasId) {
   if (aliasId !== undefined) {
     currentSelectedAliasId = aliasId;
   }
 
   if (!localData) return;
 
-  const articles = document.querySelectorAll('article');
-  if (articles.length === 0) return;
+  const originalSection = document.querySelector('section');
+  if (!originalSection) return;
 
-  // 全てのグリッド要素と、その親の行ラッパー要素を取得
-  const allGrids = Array.from(document.querySelectorAll('.grid'));
-  const rowWrappers = allGrids.map(grid => grid.parentElement);
+  const originalVirtualContainer = originalSection.firstElementChild;
+  let customGrid = document.getElementById('custom-filter-grid');
 
-  // 1. 各articleの元の親コンテナを記憶し、絞り込み条件に合うか判定
-  const matchedArticles = [];
-  articles.forEach(article => {
-    // 初回参照時に元の親グリッドを記憶
-    if (!article._originalParent) {
-      article._originalParent = article.parentElement;
-    }
-
-    const link = article.querySelector('a[data-testid="PackageCard"]');
-    if (!link) return;
-
-    const pidMatch = link.getAttribute('href').match(/pid=([^&]+)/);
-    if (!pidMatch) return;
-
-    const pid = pidMatch[1];
-    const packageInfo = localData.packages[pid];
-    const aliases = packageInfo ? packageInfo.aliases : [];
-
-    // 選択された条件に合致するか判定
-    if (currentSelectedAliasId === "" || aliases.includes(currentSelectedAliasId)) {
-      matchedArticles.push(article);
-    }
-  });
-
+  // 【指定なし（リセット）】カスタムグリッドを隠し、元の仮想スクロール領域を完全復元
   if (currentSelectedAliasId === "") {
-    // 【指定なしの場合】すべてのカードを元の親グリッドに戻し、表示状態をリセット
-    articles.forEach(article => {
-      if (article._originalParent) {
-        article._originalParent.appendChild(article);
-      }
-      article.style.display = '';
-    });
-    // 全ての行ラッパーを表示
-    rowWrappers.forEach(wrapper => {
-      if (wrapper) wrapper.style.display = '';
-    });
-    // メイングリッドの行間スタイルをリセット
-    if (allGrids[0]) allGrids[0].style.rowGap = '';
-  } else {
-    // 【絞り込みありの場合】カードを左上から順に詰めて並べる
-    if (allGrids.length === 0) return;
-    const mainGrid = allGrids[0];
-
-    // 1つのグリッド内で複数行並ぶため行間（row-gap）を設定
-    mainGrid.style.rowGap = '28px';
-
-    // 該当するカードを表示し、先頭のグリッドに順番に追加（自動で左上から詰まる）
-    matchedArticles.forEach(article => {
-      article.style.display = '';
-      mainGrid.appendChild(article);
-    });
-
-    // 該当しないカードは非表示
-    articles.forEach(article => {
-      if (!matchedArticles.includes(article)) {
-        article.style.display = 'none';
-      }
-    });
-
-    // 2行目以降の空になった行ラッパーを非表示にし、先頭行ラッパーのみ表示
-    rowWrappers.forEach((wrapper, index) => {
-      if (wrapper) {
-        wrapper.style.display = (index === 0) ? '' : 'none';
-      }
-    });
+    if (customGrid) customGrid.style.display = 'none';
+    if (originalVirtualContainer) originalVirtualContainer.style.display = '';
+    if (originalSection) originalSection.style.minHeight = '';
+    return;
   }
+
+  // 初回絞り込み時に未読み込みカードがあれば全件収集スキャンを実行
+  if (cardCache.size < Object.keys(localData.packages).length) {
+    await scanAndCacheAllCards();
+  } else {
+    cacheArticlesFromDOM();
+  }
+
+  // 元の仮想スクロール要素は隠すが、高さ（minHeight）のみ保持してページスクロールを可能にする
+  if (originalVirtualContainer) {
+    const originalHeight = originalVirtualContainer.firstElementChild?.style.height || '1000px';
+    originalSection.style.minHeight = originalHeight;
+    originalVirtualContainer.style.display = 'none';
+  }
+
+  // カスタムグリッド要素の作成とスタイリング（レスポンシブ対応）
+  if (!customGrid) {
+    customGrid = document.createElement('div');
+    customGrid.id = 'custom-filter-grid';
+    customGrid.className = 'grid w-full items-stretch grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5 gap-3 md:gap-4 mb-7';
+    originalSection.appendChild(customGrid);
+  }
+
+  // 絞り込み画面の再描画
+  renderCustomGrid();
 }
 
-// スクロール等による動的DOM追加を監視し、選択中の条件で再絞り込みを行う関数
-function observeDOMChanges() {
-  const targetNode = document.querySelector('section') || document.body;
-  const observer = new MutationObserver((mutations) => {
-    let hasUnprocessedArticles = false;
+// 選択中の条件に合わせてカスタムグリッドを描画する関数
+function renderCustomGrid() {
+  const customGrid = document.getElementById('custom-filter-grid');
+  if (!customGrid || currentSelectedAliasId === "") return;
 
-    for (const mutation of mutations) {
-      for (const node of mutation.addedNodes) {
-        if (node.nodeType === 1) {
-          // 新しく追加されたノードからarticle要素を検出
-          const articles = node.tagName === 'ARTICLE' ? [node] : Array.from(node.querySelectorAll?.('article') || []);
-          for (const article of articles) {
-            // 元の親が未記録の（新しく動的読み込みされた）カードがあるか判定
-            if (!article._originalParent) {
-              hasUnprocessedArticles = true;
-              break;
-            }
-          }
-        }
-        if (hasUnprocessedArticles) break;
-      }
-      if (hasUnprocessedArticles) break;
+  customGrid.innerHTML = '';
+  customGrid.style.display = 'grid';
+
+  // 選択された条件に一致するパッケージPIDを取得
+  const targetPids = Object.entries(localData.packages)
+    .filter(([_, info]) => info.aliases && info.aliases.includes(currentSelectedAliasId))
+    .map(([pid, _]) => pid);
+
+  // キャッシュから一致するカードを取得して左上詰めで配置
+  targetPids.forEach(pid => {
+    const cachedArticle = cardCache.get(pid);
+    if (cachedArticle) {
+      const articleClone = cachedArticle.cloneNode(true);
+      articleClone.style.display = 'flex';
+      customGrid.appendChild(articleClone);
     }
+  });
+}
 
-    // 未処理の新しいカードが追加された場合のみ絞り込みを再適用
-    if (hasUnprocessedArticles && currentSelectedAliasId !== "") {
-      filterByActress(currentSelectedAliasId);
+// 画面内のDOM変化（スクロールによる新カード出現）をリアルタイム検知してキャッシュ＆再描画
+function observeDOMChanges() {
+  cacheArticlesFromDOM(); // 初回実行
+
+  const targetNode = document.querySelector('section') || document.body;
+  const observer = new MutationObserver(() => {
+    const previousCacheSize = cardCache.size;
+    cacheArticlesFromDOM();
+
+    // 手動スクロール等で新しいカードがキャッシュされた場合、絞り込み画面を更新
+    if (cardCache.size > previousCacheSize && currentSelectedAliasId !== "") {
+      renderCustomGrid();
     }
   });
 
@@ -163,7 +203,7 @@ async function init() {
   if (!data) return;
 
   injectCustomUI();
-  observeDOMChanges(); // スクロールによる要素追加の監視を開始
+  observeDOMChanges(); // DOM監視とリアルタイムキャッシュを開始
 
   const selectElement = document.querySelector('#custom-filter-ui select');
   if (!selectElement) return;
