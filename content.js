@@ -2,6 +2,7 @@
 let localData = null; // local_data.jsonのデータを保持
 let currentSelectedAliasId = ""; // 現在選択されている絞り込みIDを保持
 const cardCache = new Map(); // pid -> article要素のクローンを保持するキャッシュ
+let resizeObserver = null; // スタイル同期用のResizeObserver
 
 async function loadLocalData() {
   try {
@@ -50,7 +51,7 @@ async function scanAndCacheAllCards() {
   const totalHeight = virtualContainer ? parseFloat(virtualContainer.style.height) || document.body.scrollHeight : document.body.scrollHeight;
   const step = Math.floor(window.innerHeight * 0.8) || 600;
 
-  // Reactの描画更新（150ms）を待ちながら順番にスクロールして全カードを読み込む
+  // Reactの描画更新（150ms）を待ちながら全カードを順次キャッシュ
   for (let top = 0; top <= totalHeight; top += step) {
     window.scrollTo(0, top);
     await new Promise(resolve => setTimeout(resolve, 150));
@@ -79,6 +80,26 @@ function showLoadingIndicator(show) {
   } else if (indicator) {
     indicator.style.display = 'none';
   }
+}
+
+// オリジナルの .grid から列数・余白のスタイルを取得してカスタムグリッドに流用・同期する関数
+function syncGridStyle() {
+  const customGrid = document.getElementById('custom-filter-grid');
+  const originalGrid = document.querySelector('section article')?.parentElement;
+  if (!customGrid || !originalGrid) return;
+
+  // オリジナル要素のクラス名をそのまま流用
+  customGrid.className = originalGrid.className;
+
+  // 計算済みスタイルまたはインラインスタイルから列数や余白を取得して完全再現
+  const computedStyle = window.getComputedStyle(originalGrid);
+  const gridTemplateColumns = originalGrid.style.gridTemplateColumns || computedStyle.gridTemplateColumns;
+  const columnGap = originalGrid.style.columnGap || computedStyle.columnGap || '12px';
+
+  customGrid.style.gridTemplateColumns = gridTemplateColumns;
+  customGrid.style.columnGap = columnGap;
+  customGrid.style.rowGap = '28px'; // オリジナルの margin-bottom 28px を行間として再現
+  customGrid.style.marginBottom = '28px';
 }
 
 function injectCustomUI() {
@@ -119,37 +140,46 @@ async function filterByActress(aliasId) {
   const originalVirtualContainer = originalSection.firstElementChild;
   let customGrid = document.getElementById('custom-filter-grid');
 
-  // 【指定なし（リセット）】カスタムグリッドを隠し、元の仮想スクロール領域を完全復元
+  // 【指定なし（リセット）】カスタムグリッドを隠し、元の表示・レスポンシブ構造を復元
   if (currentSelectedAliasId === "") {
     if (customGrid) customGrid.style.display = 'none';
     if (originalVirtualContainer) originalVirtualContainer.style.display = '';
-    if (originalSection) originalSection.style.minHeight = '';
     return;
   }
 
-  // 初回絞り込み時に未読み込みカードがあれば全件収集スキャンを実行
+  // 未読み込みカードがある場合は自動スキャン実行
   if (cardCache.size < Object.keys(localData.packages).length) {
     await scanAndCacheAllCards();
   } else {
     cacheArticlesFromDOM();
   }
 
-  // 元の仮想スクロール要素は隠すが、高さ（minHeight）のみ保持してページスクロールを可能にする
+  // 元の仮想スクロール表示領域を非表示化
   if (originalVirtualContainer) {
-    const originalHeight = originalVirtualContainer.firstElementChild?.style.height || '1000px';
-    originalSection.style.minHeight = originalHeight;
     originalVirtualContainer.style.display = 'none';
   }
 
-  // カスタムグリッド要素の作成とスタイリング（レスポンシブ対応）
+  // カスタムグリッド要素の作成
   if (!customGrid) {
     customGrid = document.createElement('div');
     customGrid.id = 'custom-filter-grid';
-    customGrid.className = 'grid w-full items-stretch grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5 gap-3 md:gap-4 mb-7';
     originalSection.appendChild(customGrid);
+
+    // ウィンドウサイズ変更時にオリジナルのグリッドスタイルを自動同期
+    window.addEventListener('resize', syncGridStyle);
+
+    // オリジナル要素のスタイル変更（レスポンシブ変化）を検知して同期
+    const originalGrid = document.querySelector('section article')?.parentElement;
+    if (originalGrid && window.ResizeObserver) {
+      resizeObserver = new ResizeObserver(() => syncGridStyle());
+      resizeObserver.observe(originalGrid);
+    }
   }
 
-  // 絞り込み画面の再描画
+  // オリジナルのレスポンシブスタイルを適用
+  syncGridStyle();
+
+  // 絞り込み結果を描画
   renderCustomGrid();
 }
 
@@ -161,12 +191,12 @@ function renderCustomGrid() {
   customGrid.innerHTML = '';
   customGrid.style.display = 'grid';
 
-  // 選択された条件に一致するパッケージPIDを取得
+  // 一致するパッケージPIDを取得
   const targetPids = Object.entries(localData.packages)
     .filter(([_, info]) => info.aliases && info.aliases.includes(currentSelectedAliasId))
     .map(([pid, _]) => pid);
 
-  // キャッシュから一致するカードを取得して左上詰めで配置
+  // キャッシュから対象カードをそのまま流用して左上詰めで追加
   targetPids.forEach(pid => {
     const cachedArticle = cardCache.get(pid);
     if (cachedArticle) {
@@ -177,7 +207,7 @@ function renderCustomGrid() {
   });
 }
 
-// 画面内のDOM変化（スクロールによる新カード出現）をリアルタイム検知してキャッシュ＆再描画
+// 画面内のDOM変化を監視して動的にキャッシュ追加・グリッド更新
 function observeDOMChanges() {
   cacheArticlesFromDOM(); // 初回実行
 
